@@ -1,6 +1,6 @@
 // ================= 参数配置区（按需修改） =================
 const ARGO_TOKEN     = '';                     // 固定隧道 Token；留空则自动使用临时隧道
-const ARGO_DOMAIN    = ''; // 固定隧道绑定的域名；临时隧道留空
+const ARGO_DOMAIN    = '';                     // 固定隧道绑定的域名；临时隧道留空
 const CUSTOM_UUID    = '';                     // 自定义 UUID；留空则首次启动自动生成
 const XHTTP_PATH     = '/xhttp';               // XHTTP 路径
 const XRAY_PORT      = 8080;                   // Xray 本地监听端口（与隧道回源端口一致）
@@ -9,6 +9,15 @@ const NODE_NAME      = 'Argo-XHTTP-Enc';       // 节点备注名称
 const KEEP_ALIVE_MIN = 5;                      // 内部自访问保活间隔（分钟），设为 0 关闭
 const XRAY_LOG_LEVEL = 'error';                // 排查用 'info'；日常用 'error'
 const SHOW_ARGO_LOG  = false;                  // 排查用 true；日常用 false
+const XHTTP_EXTRA    = {                       // 导出节点的 XHTTP extra 参数；不需要时设为 null
+  xPaddingBytes: '100-1000',
+  xmux: {
+    maxConnections: '1-3',
+    hMaxRequestTimes: '100-200',
+    hMaxReusableSecs: '30-60',
+    hKeepAlivePeriod: 15
+  }
+};
 // ========================================================
 
 const fs = require('fs');
@@ -143,7 +152,8 @@ function prepareConfig() {
 
 function printLink(domain, meta) {
   const flowParam = FLOW ? `&flow=${encodeURIComponent(FLOW)}` : '';
-  const rawLink = `vless://${meta.uuid}@${domain}:443?encryption=${encodeURIComponent(meta.encryption)}${flowParam}&security=tls&sni=${domain}&fp=chrome&alpn=h2&type=xhttp&host=${domain}&path=${encodeURIComponent(XHTTP_PATH)}&mode=packet-up#${encodeURIComponent(NODE_NAME)}`;
+  const extraParam = XHTTP_EXTRA ? `&extra=${encodeURIComponent(JSON.stringify(XHTTP_EXTRA))}` : '';
+  const rawLink = `vless://${meta.uuid}@${domain}:443?encryption=${encodeURIComponent(meta.encryption)}${flowParam}&security=tls&sni=${domain}&fp=chrome&alpn=h2&type=xhttp&host=${domain}&path=${encodeURIComponent(XHTTP_PATH)}&mode=packet-up${extraParam}#${encodeURIComponent(NODE_NAME)}`;
   const base64Link = Buffer.from(rawLink, 'utf8').toString('base64');
 
   console.log('\n================ Base64 节点链接 ================');
