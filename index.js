@@ -129,7 +129,13 @@ function prepareConfig() {
         security: 'none',
         xhttpSettings: {
           path: XHTTP_PATH,
-          mode: 'auto'
+          mode: 'auto',
+          xPaddingBytes: '100-1000',
+          xPaddingObfsMode: true,
+          xPaddingKey: 'cow_utm_content',
+          xPaddingHeader: 'Cow-App-Context',
+          xPaddingPlacement: 'cookie',
+          xPaddingMethod: 'tokenish'
         }
       }
     }],
@@ -143,7 +149,22 @@ function prepareConfig() {
 
 function printLink(domain, meta) {
   const flowParam = FLOW ? `&flow=${encodeURIComponent(FLOW)}` : '';
-  const rawLink = `vless://${meta.uuid}@${domain}:443?encryption=${encodeURIComponent(meta.encryption)}${flowParam}&security=tls&sni=${domain}&fp=chrome&alpn=h2&type=xhttp&host=${domain}&path=${encodeURIComponent(XHTTP_PATH)}&mode=packet-up#${encodeURIComponent(NODE_NAME)}`;
+  const extraConfig = {
+    xPaddingBytes: '100-1000',
+    xPaddingObfsMode: true,
+    xPaddingKey: 'cow_utm_content',
+    xPaddingHeader: 'Cow-App-Context',
+    xPaddingPlacement: 'cookie',
+    xPaddingMethod: 'tokenish',
+    xmux: {
+      maxConnections: '1-3',
+      hMaxRequestTimes: '100-200',
+      hMaxReusableSecs: '30-60',
+      hKeepAlivePeriod: 15
+    }
+  };
+  const extraParam = `&extra=${encodeURIComponent(JSON.stringify(extraConfig))}`;
+  const rawLink = `vless://${meta.uuid}@${domain}:443?encryption=${encodeURIComponent(meta.encryption)}${flowParam}&security=tls&sni=${domain}&fp=chrome&alpn=h2&type=xhttp&host=${domain}&path=${encodeURIComponent(XHTTP_PATH)}&mode=packet-up${extraParam}#${encodeURIComponent(NODE_NAME)}`;
   const base64Link = Buffer.from(rawLink, 'utf8').toString('base64');
 
   console.log('\n================ Base64 节点链接 ================');
