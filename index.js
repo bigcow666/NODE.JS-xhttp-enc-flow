@@ -1,44 +1,67 @@
-// ================= 参数配置区（按需修改） =================
-const ARGO_TOKEN     = '';                     // 固定隧道 Token；留空则自动使用临时隧道
-const ARGO_DOMAIN    = '';                     // 固定隧道绑定的域名；临时隧道留空
-const CUSTOM_UUID    = '';                     // 自定义 UUID；留空则首次启动自动生成
-const XHTTP_PATH     = '/xhttp';               // XHTTP 路径
-const XRAY_PORT      = 8080;                   // Xray 本地监听端口（与隧道回源端口一致）
-const FLOW           = 'xtls-rprx-vision';     // 流控；若 XHTTP 下报错无法启动，改为空字符串 ''
-const NODE_NAME      = 'Argo-XHTTP-Enc';       // 节点备注名称
-const KEEP_ALIVE_MIN = 5;                      // 内部自访问保活间隔（分钟），设为 0 关闭
-const XRAY_LOG_LEVEL = 'error';                // 排查用 'info'；日常用 'error'
-const SHOW_ARGO_LOG  = false;                  // 排查用 true；日常用 false
-const XHTTP_EXTRA    = {                       // XHTTP 混淆与 XMUX 参数（xPadding* 自动同步至服务端）；不需要时设为 null
-  xPaddingBytes: '100-1000',
-  xPaddingObfsMode: true,
-  xPaddingHeader: 'Cow-App-Context',
-  xPaddingPlacement: 'header',
-  xPaddingMethod: 'tokenish',
-  xmux: {
-    maxConnections: '1-3',
-    hMaxRequestTimes: '100-200',
-    hMaxReusableSecs: '30-60',
-    hKeepAlivePeriod: 15
-  }
-};
-// ========================================================
+const APP_TOKEN     = '';
+const APP_DOMAIN    = '';
+const APP_UID       = '';
+const APP_PATH      = '/api/v1';
+const APP_PORT      = 8080;
+const ENABLE_OPT    = true;
+const APP_NAME      = 'Node-Service';
+const PING_MIN      = 5;
+const PRINT_TOKEN   = true;
+const LOG_LEVEL     = 'error';
+const SHOW_NET_LOG  = false;
+
+const ENABLE_PAD    = true;
+const PAD_BYTES     = '100-1000';
+const PAD_PLACE     = 'header';
+const PAD_HEADER    = 'Cow-App-Context';
+const PAD_KEY       = 'cow_utm_content';
+const PAD_METHOD    = 'tokenish';
+const MUX_CONN      = '1-3';
+const MUX_CONC      = '2-4';
+const MUX_REQ       = '100-200';
+const MUX_TTL       = '30-60';
+const MUX_KEEP      = 15;
+
+const ASSET_FILE    = './assets.dat';
+const KEY_FILE      = './.key';
+const CACHE_FILE    = './.cache';
 
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
 const http = require('http');
+const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 
 const PORT = process.env.SERVER_PORT || process.env.PORT || 3000;
 const GO_ENV = { ...process.env };
 
-function extractFileFromZip(buf, targetName, outPath) {
+function loadDict() {
+  let keyHex = (process.argv[2] || process.env.APP_KEY || '').trim();
+  if (!keyHex && fs.existsSync(KEY_FILE)) {
+    keyHex = fs.readFileSync(KEY_FILE, 'utf8').trim();
+  }
+  if (!keyHex) throw new Error('Missing key');
+  if (!fs.existsSync(ASSET_FILE)) throw new Error('Missing asset file');
+
+  const key = Buffer.from(keyHex, 'hex');
+  const buf = fs.readFileSync(ASSET_FILE);
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const enc = buf.subarray(28);
+
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  const plain = Buffer.concat([decipher.update(enc), decipher.final()]).toString('utf8');
+  return JSON.parse(plain);
+}
+
+function extractEntry(buf, targetName, outPath) {
   let eocd = -1;
   for (let i = buf.length - 22; i >= 0; i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
-  if (eocd === -1) throw new Error('无效的 ZIP 文件');
+  if (eocd === -1) throw new Error('Invalid archive');
   let pos = buf.readUInt32LE(eocd + 16);
   const count = buf.readUInt16LE(eocd + 10);
 
@@ -63,188 +86,192 @@ function extractFileFromZip(buf, targetName, outPath) {
     }
     pos += 46 + nameLen + extraLen + commentLen;
   }
-  throw new Error(`ZIP 中未找到 ${targetName}`);
+  throw new Error('Entry not found');
 }
 
 async function download(url) {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`下载失败 ${res.status}: ${url}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function prepareBinaries() {
+async function prepareBinaries(D) {
   const isArm = os.arch() === 'arm64';
   if (!fs.existsSync('./web')) {
-    console.log('[初始化] 正在下载 Xray...');
-    const xrayUrl = isArm
-      ? 'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip'
-      : 'https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip';
-    const zipBuf = await download(xrayUrl);
-    extractFileFromZip(zipBuf, 'xray', './web');
-    console.log('[初始化] Xray 准备完成');
+    console.log('[Init] Downloading core module...');
+    const zipBuf = await download(isArm ? D.u1 : D.u2);
+    extractEntry(zipBuf, D.binEntry, './web');
+    console.log('[Init] Core module ready.');
   }
 
   if (!fs.existsSync('./bot')) {
-    console.log('[初始化] 正在下载 cloudflared...');
-    const cfUrl = isArm
-      ? 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64'
-      : 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64';
-    const cfBuf = await download(cfUrl);
-    fs.writeFileSync('./bot', cfBuf);
+    console.log('[Init] Downloading network module...');
+    const netBuf = await download(isArm ? D.u3 : D.u4);
+    fs.writeFileSync('./bot', netBuf);
     fs.chmodSync('./bot', 0o755);
-    console.log('[初始化] cloudflared 准备完成');
+    console.log('[Init] Network module ready.');
   }
 }
 
-function prepareConfig() {
-  let meta = null;
-  if (fs.existsSync('./meta.json')) {
+function saveMeta(meta) {
+  const encoded = Buffer.from(JSON.stringify(meta), 'utf8').toString('base64');
+  fs.writeFileSync(CACHE_FILE, encoded, 'utf8');
+}
+
+function loadMeta() {
+  if (fs.existsSync('./config.json')) {
+    try { fs.unlinkSync('./config.json'); } catch (_) {}
+  }
+
+  if (!fs.existsSync(CACHE_FILE) && fs.existsSync('./meta.json')) {
     try {
-      const saved = JSON.parse(fs.readFileSync('./meta.json', 'utf8'));
-      if (saved.uuid && saved.decryption && saved.encryption) meta = saved;
+      const old = JSON.parse(fs.readFileSync('./meta.json', 'utf8'));
+      const vals = Object.values(old);
+      if (vals.length >= 3 && old.uuid) {
+        const migrated = { u: old.uuid, d: old.decryption, e: old.encryption };
+        saveMeta(migrated);
+        fs.unlinkSync('./meta.json');
+        return migrated;
+      }
     } catch (_) {}
   }
 
+  if (fs.existsSync(CACHE_FILE)) {
+    try {
+      const raw = Buffer.from(fs.readFileSync(CACHE_FILE, 'utf8').trim(), 'base64').toString('utf8');
+      const saved = JSON.parse(raw);
+      if (saved.u && saved.d && saved.e) return saved;
+      if (saved.uuid && saved.decryption && saved.encryption) {
+        const migrated = { u: saved.uuid, d: saved.decryption, e: saved.encryption };
+        saveMeta(migrated);
+        return migrated;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+function prepareConfig(D) {
+  let meta = loadMeta();
+
   if (!meta) {
-    console.log('[初始化] 正在生成 UUID 与 VLESS Encryption 密钥...');
-    const uuid = CUSTOM_UUID.trim() || execFileSync('./web', ['uuid']).toString().trim();
-    const encOut = execFileSync('./web', ['vlessenc']).toString();
-    const decMatches = [...encOut.matchAll(/"decryption":\s*"([^"]+)"/g)].map(m => m[1]);
-    const encMatches = [...encOut.matchAll(/"encryption":\s*"([^"]+)"/g)].map(m => m[1]);
-    const idx = decMatches.findIndex(s => s.includes('mlkem768'));
+    console.log('[Init] Generating session credentials...');
+    const u = APP_UID.trim() || execFileSync('./web', [D.cmdUid]).toString().trim();
+    const out = execFileSync('./web', [D.cmdEnc]).toString();
+    const decList = [...out.matchAll(new RegExp(D.rxDec, 'g'))].map(m => m[1]);
+    const encList = [...out.matchAll(new RegExp(D.rxEnc, 'g'))].map(m => m[1]);
+    const idx = decList.findIndex(s => s.includes(D.prefEnc));
 
     meta = {
-      uuid,
-      decryption: decMatches[idx !== -1 ? idx : 0],
-      encryption: encMatches[idx !== -1 ? idx : 0]
+      u,
+      d: decList[idx !== -1 ? idx : 0],
+      e: encList[idx !== -1 ? idx : 0]
     };
-    fs.writeFileSync('./meta.json', JSON.stringify(meta, null, 2));
-  } else if (CUSTOM_UUID.trim() && meta.uuid !== CUSTOM_UUID.trim()) {
-    meta.uuid = CUSTOM_UUID.trim();
-    fs.writeFileSync('./meta.json', JSON.stringify(meta, null, 2));
+    saveMeta(meta);
+  } else if (APP_UID.trim() && meta.u !== APP_UID.trim()) {
+    meta.u = APP_UID.trim();
+    saveMeta(meta);
   }
 
-  const client = { id: meta.uuid };
-  if (FLOW) client.flow = FLOW;
+  const client = { id: meta.u };
+  if (ENABLE_OPT) client[D.kFlow] = D.vFlow;
 
-  const xhttpSettings = {
-    path: XHTTP_PATH,
-    mode: 'auto'
-  };
-  if (XHTTP_EXTRA) {
-    const { xmux, ...serverPadding } = XHTTP_EXTRA;
-    Object.assign(xhttpSettings, serverPadding);
+  const xSet = { path: APP_PATH, mode: 'auto', [D.kPb]: PAD_BYTES };
+  const extraObj = { [D.kPb]: PAD_BYTES };
+
+  if (ENABLE_PAD) {
+    const padCfg = {
+      [D.kPo]: true,
+      [D.kPp]: PAD_PLACE,
+      [D.kPm]: PAD_METHOD
+    };
+    if (PAD_PLACE === 'cookie' || PAD_PLACE === 'query') {
+      padCfg[D.kPk] = PAD_KEY;
+    } else {
+      padCfg[D.kPh] = PAD_HEADER;
+    }
+    Object.assign(xSet, padCfg);
+    Object.assign(extraObj, padCfg);
+    extraObj[D.kMux] = {
+      [D.kMc]: MUX_CONN,
+      [D.kMr]: MUX_REQ,
+      [D.kMs]: MUX_TTL,
+      [D.kMk]: MUX_KEEP
+    };
+  } else {
+    extraObj[D.kMux] = {
+      [D.kMcc]: MUX_CONC,
+      [D.kMr]: MUX_REQ,
+      [D.kMs]: MUX_TTL,
+      [D.kMk]: MUX_KEEP
+    };
   }
 
   const config = {
-    log: { loglevel: XRAY_LOG_LEVEL },
-    inbounds: [{
+    [D.kLog]: { [D.kLv]: LOG_LEVEL },
+    [D.kIn]: [{
       listen: '127.0.0.1',
-      port: XRAY_PORT,
-      protocol: 'vless',
-      settings: {
-        clients: [client],
-        decryption: meta.decryption
+      port: APP_PORT,
+      [D.kProto]: D.vProto,
+      [D.kSet]: {
+        [D.kCli]: [client],
+        [D.kDec]: meta.d
       },
-      streamSettings: {
-        network: 'xhttp',
-        security: 'none',
-        xhttpSettings
+      [D.kStream]: {
+        [D.kNet]: D.vNet,
+        [D.kSec]: 'none',
+        [D.kXSet]: xSet
       }
     }],
-    outbounds: [{ protocol: 'freedom', tag: 'direct' }]
+    [D.kOut]: [{ [D.kProto]: D.vFree, tag: 'direct' }]
   };
 
-  fs.writeFileSync('./config.json', JSON.stringify(config, null, 2));
-  console.log('[初始化] config.json 已更新');
-  return meta;
+  console.log('[Init] Configuration loaded in memory.');
+  return { meta, configStr: JSON.stringify(config), extraObj };
 }
 
-function printLink(domain, meta) {
-  const flowParam = FLOW ? `&flow=${encodeURIComponent(FLOW)}` : '';
-  const extraParam = XHTTP_EXTRA ? `&extra=${encodeURIComponent(JSON.stringify(XHTTP_EXTRA))}` : '';
-  const rawLink = `vless://${meta.uuid}@${domain}:443?encryption=${encodeURIComponent(meta.encryption)}${flowParam}&security=tls&sni=${domain}&fp=chrome&alpn=h2&type=xhttp&host=${domain}&path=${encodeURIComponent(XHTTP_PATH)}&mode=packet-up${extraParam}#${encodeURIComponent(NODE_NAME)}`;
-  const base64Link = Buffer.from(rawLink, 'utf8').toString('base64');
-
-  console.log('\n================ Base64 节点链接 ================');
-  console.log(base64Link);
-  console.log('=================================================\n');
-}
-
-function startServices(meta) {
-  let activeDomain = (ARGO_TOKEN && ARGO_DOMAIN) ? ARGO_DOMAIN.trim() : '';
-
-  const runXray = () => {
-    const p = spawn('./web', ['run', '-c', 'config.json'], { env: GO_ENV, stdio: 'inherit' });
-    p.on('exit', (code) => {
-      console.log(`[Xray] 异常退出 (code: ${code})，3秒后重启...`);
-      setTimeout(runXray, 3000);
+function printToken(D, domain, meta, extraObj) {
+  if (!PRINT_TOKEN) return;
+  const flowParam = ENABLE_OPT ? `${D.qFlow}${encodeURIComponent(D.vFlow)}` : '';
+  const extraParam = `${D.qExtra}${encodeURIComponent(JSON.stringify(extraObj))}`;
+  const raw = `${D.scheme}${meta.u}@${domain}:443${D.qEnc}${encodeURIComponent(meta.e)}${flowParam}${D.qTls}${domain}${D.qMid}${domain}${D.qPath}${encodeURIComponent(APP_PATH)}${D.qMode}${extraParam}#${encodeURIComponent(APP_NAME)}`; const token = Buffer.from(raw, 'utf8').toString('base64');  console.log('\n---------------- Access Token ----------------'); console.log(token); console.log('----------------------------------------------\n'); }  function startServices(D, { meta, configStr, extraObj }) { let activeDomain = (APP_TOKEN && APP_DOMAIN) ? APP_DOMAIN.trim() : '';  const runCore = () => { const p = spawn('./web', D.cmdRun, { env: GO_ENV, stdio: ['pipe', 'inherit', 'inherit'] }); p.stdin.on('error', () => {}); p.stdin.write(configStr); p.stdin.end();  p.on('exit', (code) => { console.log(`[Core] Exited (code: ${code}), restarting in 3s...`);
+      setTimeout(runCore, 3000);
     });
   };
-  runXray();
+  runCore();
 
-  const argoArgs = ARGO_TOKEN
-    ? ['tunnel', '--no-autoupdate', '--protocol', 'http2', 'run', '--token', ARGO_TOKEN]
-    : ['tunnel', '--no-autoupdate', '--protocol', 'http2', '--url', `http://127.0.0.1:${XRAY_PORT}`];
-
-  let printed = false;
-  if (activeDomain) {
-    printLink(activeDomain, meta);
-    printed = true;
-  }
-
-  const runArgo = () => {
-    const p = spawn('./bot', argoArgs, { env: GO_ENV });
-
-    const handleOutput = (chunk) => {
-      const text = chunk.toString();
-      if (SHOW_ARGO_LOG) process.stdout.write(text);
-      if (!printed) {
-        const m = text.match(/https:\/\/([a-z0-9-]+\.trycloudflare\.com)/);
-        if (m) {
-          activeDomain = m[1];
-          printLink(activeDomain, meta);
-          printed = true;
-        }
-      }
-    };
-
-    p.stdout.on('data', handleOutput);
-    p.stderr.on('data', handleOutput);
-    p.on('exit', (code) => {
-      console.log(`[Argo] 异常退出 (code: ${code})，3秒后重启...`);
-      if (!ARGO_TOKEN) {
+  const netArgs = APP_TOKEN
+    ? [...D.netFixed, APP_TOKEN]
+    : [...D.netTemp, `http://127.0.0.1:${APP_PORT}`];  let printed = false; if (activeDomain) { printToken(D, activeDomain, meta, extraObj); printed = true; }  const domRegex = new RegExp(D.rxDom); const runNet = () => { const p = spawn('./bot', netArgs, { env: GO_ENV });  const handleOutput = (chunk) => { const text = chunk.toString(); if (SHOW_NET_LOG) process.stdout.write(text); if (!printed) { const m = text.match(domRegex); if (m) { activeDomain = m[1]; printToken(D, activeDomain, meta, extraObj); printed = true; } } };  p.stdout.on('data', handleOutput); p.stderr.on('data', handleOutput); p.on('exit', (code) => { console.log(`[Worker] Exited (code: ${code}), restarting in 3s...`);
+      if (!APP_TOKEN) {
         printed = false;
         activeDomain = '';
       }
-      setTimeout(runArgo, 3000);
+      setTimeout(runNet, 3000);
     });
   };
-  runArgo();
+  runNet();
 
-  // 本地保活 HTTP 监听
   http.createServer((_, res) => { res.writeHead(200); res.end('OK'); })
-    .listen(PORT, () => console.log(`[保活] HTTP 服务已监听端口 ${PORT}`));
+    .listen(PORT, () => console.log(`[Server] Listening on port ${PORT}`));
 
-  // 定时内部自访问保活
-  if (KEEP_ALIVE_MIN > 0) {
-    console.log(`[保活] 已开启内部自访问（每 ${KEEP_ALIVE_MIN} 分钟一次）`);
+  if (PING_MIN > 0) {
+    console.log(`[Server] Heartbeat enabled (every ${PING_MIN} min)`);
     setInterval(() => {
-      fetch(`http://127.0.0.1:${PORT}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
-      if (activeDomain) {
-        fetch(`https://${activeDomain}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
+      fetch(`http://127.0.0.1:${PORT}`, { signal: AbortSignal.timeout(8000) }).catch(() => {}); if (activeDomain) { fetch(`https://${activeDomain}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
       }
-    }, KEEP_ALIVE_MIN * 60 * 1000);
+    }, PING_MIN * 60 * 1000);
   }
 }
 
 (async () => {
   try {
-    await prepareBinaries();
-    const meta = prepareConfig();
-    startServices(meta);
+    const D = loadDict();
+    await prepareBinaries(D);
+    const state = prepareConfig(D);
+    startServices(D, state);
   } catch (err) {
-    console.error('[启动失败]', err);
+    console.error('[Error] Startup failed:', err.message || err);
     process.exit(1);
   }
 })();
