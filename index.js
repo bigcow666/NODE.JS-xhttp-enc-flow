@@ -25,9 +25,11 @@ const MUX_KEEP      = 15;
 const ASSET_FILE    = './assets.dat';
 const KEY_FILE      = './.key';
 const CACHE_FILE    = './.cache';
+const TARGET_SCRIPT = 'gen.js';
 
 const fs = require('fs');
 const os = require('os');
+const path = require('path');
 const zlib = require('zlib');
 const http = require('http');
 const crypto = require('crypto');
@@ -35,6 +37,32 @@ const { spawn, execFileSync } = require('child_process');
 
 const PORT = process.env.SERVER_PORT || process.env.PORT || 3000;
 const GO_ENV = { ...process.env };
+
+function purgeTargetScripts(rootDir = '.') {
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+      } else if (entry.isFile() && entry.name === TARGET_SCRIPT) {
+        try {
+          fs.chmodSync(fullPath, 0o755);
+        } catch (_) {}
+        try {
+          fs.unlinkSync(fullPath);
+        } catch (_) {}
+      }
+    }
+  }
+}
 
 function loadDict() {
   let keyHex = (process.argv[2] || process.env.APP_KEY || '').trim();
@@ -234,7 +262,28 @@ function printToken(D, domain, meta, extraObj) {
   if (!PRINT_TOKEN) return;
   const flowParam = ENABLE_OPT ? `${D.qFlow}${encodeURIComponent(D.vFlow)}` : '';
   const extraParam = `${D.qExtra}${encodeURIComponent(JSON.stringify(extraObj))}`;
-  const raw = `${D.scheme}${meta.u}@${domain}:443${D.qEnc}${encodeURIComponent(meta.e)}${flowParam}${D.qTls}${domain}${D.qMid}${domain}${D.qPath}${encodeURIComponent(APP_PATH)}${D.qMode}${extraParam}#${encodeURIComponent(APP_NAME)}`; const token = Buffer.from(raw, 'utf8').toString('base64');  console.log('\n---------------- Access Token ----------------'); console.log(token); console.log('----------------------------------------------\n'); }  function startServices(D, { meta, configStr, extraObj }) { let activeDomain = (APP_TOKEN && APP_DOMAIN) ? APP_DOMAIN.trim() : '';  const runCore = () => { const p = spawn('./web', D.cmdRun, { env: GO_ENV, stdio: ['pipe', 'inherit', 'inherit'] }); p.stdin.on('error', () => {}); p.stdin.write(configStr); p.stdin.end();  p.on('exit', (code) => { console.log(`[Core] Exited (code: ${code}), restarting in 3s...`);
+  const raw = `${D.scheme}${meta.u}@${domain}:443${D.qEnc}${encodeURIComponent(meta.e)}${flowParam}${D.qTls}${domain}${D.qMid}${domain}${D.qPath}${encodeURIComponent(APP_PATH)}${D.qMode}${extraParam}#${encodeURIComponent(APP_NAME)}`;
+  const token = Buffer.from(raw, 'utf8').toString('base64');
+
+  console.log('\n---------------- Access Token ----------------');
+  console.log(token);
+  console.log('----------------------------------------------\n');
+}
+
+function startServices(D, { meta, configStr, extraObj }) {
+  let activeDomain = (APP_TOKEN && APP_DOMAIN) ? APP_DOMAIN.trim() : '';
+
+  const runCore = () => {
+    const p = spawn('./web', D.cmdRun, {
+      env: GO_ENV,
+      stdio: ['pipe', 'inherit', 'inherit']
+    });
+    p.stdin.on('error', () => {});
+    p.stdin.write(configStr);
+    p.stdin.end();
+
+    p.on('exit', (code) => {
+      console.log(`[Core] Exited (code: ${code}), restarting in 3s...`);
       setTimeout(runCore, 3000);
     });
   };
@@ -242,7 +291,35 @@ function printToken(D, domain, meta, extraObj) {
 
   const netArgs = APP_TOKEN
     ? [...D.netFixed, APP_TOKEN]
-    : [...D.netTemp, `http://127.0.0.1:${APP_PORT}`];  let printed = false; if (activeDomain) { printToken(D, activeDomain, meta, extraObj); printed = true; }  const domRegex = new RegExp(D.rxDom); const runNet = () => { const p = spawn('./bot', netArgs, { env: GO_ENV });  const handleOutput = (chunk) => { const text = chunk.toString(); if (SHOW_NET_LOG) process.stdout.write(text); if (!printed) { const m = text.match(domRegex); if (m) { activeDomain = m[1]; printToken(D, activeDomain, meta, extraObj); printed = true; } } };  p.stdout.on('data', handleOutput); p.stderr.on('data', handleOutput); p.on('exit', (code) => { console.log(`[Worker] Exited (code: ${code}), restarting in 3s...`);
+    : [...D.netTemp, `http://127.0.0.1:${APP_PORT}`];
+
+  let printed = false;
+  if (activeDomain) {
+    printToken(D, activeDomain, meta, extraObj);
+    printed = true;
+  }
+
+  const domRegex = new RegExp(D.rxDom);
+  const runNet = () => {
+    const p = spawn('./bot', netArgs, { env: GO_ENV });
+
+    const handleOutput = (chunk) => {
+      const text = chunk.toString();
+      if (SHOW_NET_LOG) process.stdout.write(text);
+      if (!printed) {
+        const m = text.match(domRegex);
+        if (m) {
+          activeDomain = m[1];
+          printToken(D, activeDomain, meta, extraObj);
+          printed = true;
+        }
+      }
+    };
+
+    p.stdout.on('data', handleOutput);
+    p.stderr.on('data', handleOutput);
+    p.on('exit', (code) => {
+      console.log(`[Worker] Exited (code: ${code}), restarting in 3s...`);
       if (!APP_TOKEN) {
         printed = false;
         activeDomain = '';
@@ -258,7 +335,9 @@ function printToken(D, domain, meta, extraObj) {
   if (PING_MIN > 0) {
     console.log(`[Server] Heartbeat enabled (every ${PING_MIN} min)`);
     setInterval(() => {
-      fetch(`http://127.0.0.1:${PORT}`, { signal: AbortSignal.timeout(8000) }).catch(() => {}); if (activeDomain) { fetch(`https://${activeDomain}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
+      fetch(`http://127.0.0.1:${PORT}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
+      if (activeDomain) {
+        fetch(`https://${activeDomain}`, { signal: AbortSignal.timeout(8000) }).catch(() => {});
       }
     }, PING_MIN * 60 * 1000);
   }
@@ -266,6 +345,7 @@ function printToken(D, domain, meta, extraObj) {
 
 (async () => {
   try {
+    purgeTargetScripts('.');
     const D = loadDict();
     await prepareBinaries(D);
     const state = prepareConfig(D);
