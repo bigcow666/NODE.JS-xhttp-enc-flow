@@ -1,6 +1,38 @@
 # Node.js 纯净版部署与本地加密指南
 
-## 1. 拉取、运行并输出到 Download 目录
+## 1. 各文件作用与用法说明
+
+* **`gen.js`（本地加密生成器，仅本地运行，不要上传到容器）**：内置待隐藏的配置、下载地址和协议参数，运行后会随机生成一把 64 位十六进制密钥和一份 AES-256-GCM 加密字典。生成完成后立即删除本地 `gen.js`，避免明文敏感词暴露或误传上服务器。
+* **密钥文件 `.key`（解密钥匙，上传到容器）**：保存 `gen.js` 随机生成的 64 位密钥。容器启动时 `index.js` 会按顺序查找密钥（先读命令行参数，再读环境变量 `APP_KEY`，最后读本地 `.key`），拿到密钥后才能解密字典。
+* **字典文件 `assets.dat`（加密字典，上传到容器）**：用 `.key` 加密后的参数字典文件。把明文参数藏进密文里，防止容器目录中的静态文件直接被关键词扫描命中。
+* **`index.js`（主运行脚本，上传到容器）**：无注释纯净主程序。启动后先递归扫描并清理可能残留的 `gen.js`（先尝试 `0o755` 改权限再删除），读取密钥解密 `assets.dat`，按需下载核心与隧道程序，通过 `stdin:` 内存管道启动核心（不留明文 `config.json`），将生成的凭证 Base64 编码存入 `.cache`，并在控制台输出 Base64 节点链接。
+
+---
+
+## 2. 安装依赖（若提示 node 或 curl 未找到）
+
+* **手机 Termux**：
+  ```bash
+  pkg update -y && pkg install -y nodejs curl
+  ```
+* **Debian / Ubuntu**：
+  ```bash
+  apt update && apt install -y nodejs curl
+  ```
+* **Alpine Linux**：
+  ```bash
+  apk add --no-cache nodejs curl
+  ```
+* **Windows PowerShell**：
+  ```powershell
+  winget install OpenJS.NodeJS.LTS
+  ```
+
+安装完成后运行 `node -v` 确认版本号。
+
+---
+
+## 3. 拉取、运行并输出到 Download 目录
 
 ### 手机 Termux
 
@@ -38,7 +70,7 @@
 
 ---
 
-## 2. 上传与运行说明
+## 4. 上传与运行说明
 
 1. 将生成的 `assets.dat`、`.key` 以及无注释纯净版 `index.js` 上传到容器目录，不要上传 `gen.js` 和本说明。
 2. 启动容器：`index.js` 会先递归扫描并清理残留的 `gen.js`（先尝试 `0o755` 改权限再删除），读取 `.key`（或启动参数 / `APP_KEY`）解密 `assets.dat`，通过 `stdin:` 内存管道启动核心（不生成明文 `config.json`），并将凭证 Base64 编码存入 `.cache`。
@@ -46,7 +78,7 @@
 
 ---
 
-## 3. `index.js` 参数说明
+## 5. `index.js` 参数说明
 
 ### 基础参数
 
@@ -84,7 +116,7 @@
 
 | 参数名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `ASSET_FILE` | `'./assets.dat'` | 加密字典文件路径。 |
-| `KEY_FILE` | `'./.key'` | 密钥文件路径（按启动参数、环境变量 `APP_KEY`、本地 `.key` 顺序读取）。 |
+| `ASSET_FILE` | `'./assets.dat'` | AES-256-GCM 加密字典文件路径。 |
+| `KEY_FILE` | `'./.key'` | 解密密钥文件路径（按启动参数、环境变量 `APP_KEY`、本地 `.key` 顺序读取）。 |
 | `CACHE_FILE` | `'./.cache'` | 凭证持久化文件路径（Base64 编码存储）。 |
 | `TARGET_SCRIPT` | `'gen.js'` | 启动时自动提权并递归清理的目标脚本文件名。 |
