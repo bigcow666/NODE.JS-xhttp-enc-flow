@@ -9,8 +9,12 @@ const NODE_NAME      = 'Argo-XHTTP-Enc';       // 节点备注名称
 const KEEP_ALIVE_MIN = 5;                      // 内部自访问保活间隔（分钟），设为 0 关闭
 const XRAY_LOG_LEVEL = 'error';                // 排查用 'info'；日常用 'error'
 const SHOW_ARGO_LOG  = false;                  // 排查用 true；日常用 false
-const XHTTP_EXTRA    = {                       // 导出节点的 XHTTP extra 参数；不需要时设为 null
+const XHTTP_EXTRA    = {                       // XHTTP 混淆与 XMUX 参数（xPadding* 自动同步至服务端）；不需要时设为 null
   xPaddingBytes: '100-1000',
+  xPaddingObfsMode: true,
+  xPaddingHeader: 'Cow-App-Context',
+  xPaddingPlacement: 'header',
+  xPaddingMethod: 'tokenish',
   xmux: {
     maxConnections: '1-3',
     hMaxRequestTimes: '100-200',
@@ -123,6 +127,15 @@ function prepareConfig() {
   const client = { id: meta.uuid };
   if (FLOW) client.flow = FLOW;
 
+  const xhttpSettings = {
+    path: XHTTP_PATH,
+    mode: 'auto'
+  };
+  if (XHTTP_EXTRA) {
+    const { xmux, ...serverPadding } = XHTTP_EXTRA;
+    Object.assign(xhttpSettings, serverPadding);
+  }
+
   const config = {
     log: { loglevel: XRAY_LOG_LEVEL },
     inbounds: [{
@@ -136,10 +149,7 @@ function prepareConfig() {
       streamSettings: {
         network: 'xhttp',
         security: 'none',
-        xhttpSettings: {
-          path: XHTTP_PATH,
-          mode: 'auto'
-        }
+        xhttpSettings
       }
     }],
     outbounds: [{ protocol: 'freedom', tag: 'direct' }]
